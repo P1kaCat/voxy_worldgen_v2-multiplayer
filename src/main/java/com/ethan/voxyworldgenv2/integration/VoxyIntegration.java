@@ -3,53 +3,87 @@ package com.ethan.voxyworldgenv2.integration;
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import net.minecraft.world.level.chunk.LevelChunk;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+
 public final class VoxyIntegration {
-    private static boolean voxyAvailable = false;
-    private static boolean checkedAvailability = false;
-    
+    private static boolean initialized = false;
+    private static boolean enabled = false;
+    private static MethodHandle ingestMethod;
+
     private VoxyIntegration() {}
-    
-    public static void ingestChunk(LevelChunk chunk) {
-        if (!isVoxyAvailable()) return;
-        
+
+    private static void initialize() {
+        if (initialized) return;
+        initialized = true;
+
         try {
             Class<?> ingestServiceClass = Class.forName("me.cortex.voxy.common.world.service.VoxelIngestService");
+            
             Object serviceInstance = null;
             try {
-                var instanceField = ingestServiceClass.getDeclaredField("INSTANCE");
+                Field instanceField = ingestServiceClass.getDeclaredField("INSTANCE");
                 serviceInstance = instanceField.get(null);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // INSTANCE might not exist or be accessible
+            }
 
+            // 1. Find method using standard Reflection (avoids guessing exact return type)
             String[] commonMethods = {"ingestChunk", "tryAutoIngestChunk", "enqueueIngest", "ingest"};
-            java.lang.reflect.Method targetMethod = null;
+            Method targetMethod = null;
+            
             for (String methodName : commonMethods) {
                 try {
                     targetMethod = ingestServiceClass.getMethod(methodName, LevelChunk.class);
-                    break;
+                    if (targetMethod != null) break;
                 } catch (NoSuchMethodException ignored) {}
             }
 
             if (targetMethod != null) {
-                targetMethod.invoke(serviceInstance, chunk);
+                // 2. Convert to MethodHandle for performance
+                MethodHandles.Lookup lookup = MethodHandles.lookup();
+                try {
+                    ingestMethod = lookup.unreflect(targetMethod);
+                    
+                    // 3. Bind to instance if it exists and method is instance-based
+                    if (serviceInstance != null && !Modifier.isStatic(targetMethod.getModifiers())) {
+                        ingestMethod = ingestMethod.bindTo(serviceInstance);
+                    }
+                    
+                    enabled = true;
+                    VoxyWorldGenV2.LOGGER.info("Voxy integration initialized successfully via MethodHandle: {}", targetMethod.getName());
+                } catch (IllegalAccessException e) {
+                    VoxyWorldGenV2.LOGGER.error("Failed to unreflect Voxy method", e);
+                }
+            } else {
+                VoxyWorldGenV2.LOGGER.warn("Voxy detected but no suitable ingest method found");
             }
+
+        } catch (ClassNotFoundException e) {
+            VoxyWorldGenV2.LOGGER.info("Voxy not present, integration disabled");
+            enabled = false;
         } catch (Exception e) {
-            VoxyWorldGenV2.LOGGER.warn("voxy chunk ingestion failed: {}", e.toString());
-            voxyAvailable = false;
+            VoxyWorldGenV2.LOGGER.error("Failed to initialize Voxy integration", e);
+            enabled = false;
         }
     }
-    
-    public static boolean isVoxyAvailable() {
-        if (!checkedAvailability) {
-            checkedAvailability = true;
-            try {
-                Class.forName("me.cortex.voxy.common.world.service.VoxelIngestService");
-                voxyAvailable = true;
-                VoxyWorldGenV2.LOGGER.info("voxy integration enabled");
-            } catch (ClassNotFoundException e) {
-                voxyAvailable = false;
-                VoxyWorldGenV2.LOGGER.info("voxy not found");
-            }
+
+    public static void ingestChunk(LevelChunk chunk) {
+        if (!initialized) initialize();
+        if (!enabled || ingestMethod == null) return;
+
+        try {
+            ingestMethod.invoke(chunk);
+        } catch (Throwable e) {
+            VoxyWorldGenV2.LOGGER.error("Failed to ingest chunk into Voxy", e);
         }
-        return voxyAvailable;
+    }
+
+    public static boolean isVoxyAvailable() {
+        if (!initialized) initialize();
+        return enabled;
     }
 }

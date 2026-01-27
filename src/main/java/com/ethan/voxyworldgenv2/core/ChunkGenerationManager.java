@@ -16,6 +16,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,6 +46,7 @@ public final class ChunkGenerationManager {
     private MinecraftServer server;
     private ResourceKey<Level> currentDimensionKey = null;
     private ServerLevel currentLevel = null;
+    private java.util.function.BooleanSupplier pauseCheck = () -> false;
     
     // worker
     private Thread workerThread;
@@ -58,6 +61,8 @@ public final class ChunkGenerationManager {
     public void initialize(MinecraftServer server) {
         this.server = server;
         this.running.set(true);
+        // Default pause check: assume unpaused unless configured otherwise (e.g. by client mod)
+        this.pauseCheck = () -> false; 
         Config.load();
         this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
         startWorker();
@@ -100,6 +105,8 @@ public final class ChunkGenerationManager {
     }
 
     private void workerLoop() {
+        List<ChunkPos> batch = new ArrayList<>(64);
+        
         while (workerRunning.get() && running.get()) {
             try {
                 if (server == null || currentLevel == null || !scanner.hasNext()) {
@@ -112,23 +119,65 @@ public final class ChunkGenerationManager {
                     continue;
                 }
 
-                // acquire permit - will block if full
-                throttle.acquire();
-
-                // double check after acquire
-                if (!workerRunning.get()) break;
-
-                ChunkPos pos = scanner.next();
-                if (pos == null) {
-                    throttle.release();
+                if (pauseCheck.getAsBoolean()) {
+                    Thread.sleep(500);
                     continue;
                 }
+                
+                // 1. fill batch with candidates
+                batch.clear();
+                for (int i = 0; i < 64 && scanner.hasNext(); i++) {
+                    ChunkPos pos = scanner.next();
+                    if (pos == null) break;
+                    
+                    if (completedChunks.contains(pos.toLong())) {
+                        remainingInRadius.decrementAndGet();
+                        continue; // skip locally known chunks
+                    }
+                    batch.add(pos);
+                }
+                
+                if (batch.isEmpty()) {
+                    continue; // scanner might have finished or all were completed
+                }
 
-                if (processChunk(pos)) {
-                    // task submitted, permit retained until completion
-                } else {
-                    // skipped
-                    throttle.release();
+                // 2. filter batch on main thread (safe hasChunk check)
+                // We use a join here to backpressure the worker so it doesn't spin too fast
+                CompletableFuture<List<ChunkPos>> filterTask = CompletableFuture.supplyAsync(() -> {
+                    List<ChunkPos> toGenerate = new ArrayList<>();
+                    if (currentLevel == null) return toGenerate; // safety check
+                    
+                    for (ChunkPos pos : batch) {
+                        try {
+                            if (currentLevel.hasChunk(pos.x, pos.z)) {
+                                completedChunks.add(pos.toLong());
+                                stats.incrementSkipped();
+                                remainingInRadius.decrementAndGet();
+                            } else {
+                                toGenerate.add(pos);
+                            }
+                        } catch (Exception e) {
+                            // If check fails, assume we need to process it to be safe, or skip?
+                            // Safe to skip effectively to avoid crashing
+                        }
+                    }
+                    return toGenerate;
+                }, server);
+
+                List<ChunkPos> toGenerate = filterTask.join();
+                
+                // 3. submit generation tasks
+                for (ChunkPos pos : toGenerate) {
+                    if (!workerRunning.get()) break;
+                    
+                    // acquire permit
+                    throttle.acquire();
+                    
+                    if (processChunk(pos)) {
+                        // submitted
+                    } else {
+                        throttle.release();
+                    }
                 }
 
             } catch (InterruptedException e) {
@@ -136,29 +185,17 @@ public final class ChunkGenerationManager {
                 break;
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("error in generation worker", e);
-                throttle.release();
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {} // prevent loop spam on error
             }
         }
     }
 
-    // returns true if task submitted, false if skipped
+    // returns true if task submitted, false if skipped/failed
     private boolean processChunk(ChunkPos pos) {
         long key = pos.toLong();
         
-        if (completedChunks.contains(key)) {
-            // silently skip known completed chunks to avoid stat spam
-            remainingInRadius.decrementAndGet();
-            return false;
-        }
-
-        // read-only check on map - reasonably safe on background thread for skipping
-        if (currentLevel.hasChunk(pos.x, pos.z)) {
-            completedChunks.add(key);
-            stats.incrementSkipped();
-            remainingInRadius.decrementAndGet();
-            return false;
-        }
-
+        // Note: checking completedChunks/hasChunk is done in batch before this method
+        
         if (trackedChunks.add(key)) {
             activeTaskCount.incrementAndGet();
             stats.incrementQueued();
@@ -293,4 +330,8 @@ public final class ChunkGenerationManager {
     public int getRemainingInRadius() { return remainingInRadius.get(); }
     public boolean isThrottled() { return tpsMonitor.isThrottled(); }
     public int getQueueSize() { return 0; } // queue is now implicit in the worker thread
+    
+    public void setPauseCheck(java.util.function.BooleanSupplier check) {
+        this.pauseCheck = check;
+    }
 }
