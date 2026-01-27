@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ethan.voxyworldgenv2.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "ChunkMapMixin",
+    "MinecraftServerMixin",
+    "MinecraftServerAccess",
+    "ServerChunkCacheMixin",
+    "ServerLevelMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
