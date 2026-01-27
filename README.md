@@ -13,13 +13,13 @@ This is a rewrite of my old Voxy World Gen mod, this mod is NOT a fork of the pa
 
 - **Minecraft**: 1.21.11
 - **Fabric Loader**: >= 0.16.0
-- **Java**: 25 (Required)
+- **Java**: 21 (Required)
 - **Fabric API**
 - **Cloth Config**: >= 15.0.127
 
 ## Building
 
-This project requires Java 25. Don't use anything less or it won't build.
+This project requires Java 21.
 
 ```bash
 # Clone the repo

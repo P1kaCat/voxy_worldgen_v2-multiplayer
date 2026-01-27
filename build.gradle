@@ -42,13 +42,13 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = "UTF-8"
-    it.options.release = 25
+    it.options.release = 21
 }
 
 java {
     withSourcesJar()
-    sourceCompatibility = 25
-    targetCompatibility = 25
+    sourceCompatibility = 21
+    targetCompatibility = 21
 }
 
 jar {
