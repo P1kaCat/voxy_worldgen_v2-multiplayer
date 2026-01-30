@@ -1,0 +1,247 @@
+package com.ethan.voxyworldgenv2.core;
+
+import net.minecraft.world.level.ChunkPos;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
+
+/**
+ * track chunk generation state in a hierarchy
+ * L0: 4x4 batch
+ * L1: 8x8 L0 (32x32)
+ * L2: 8x8 L1 (256x256)
+ * L3: 8x8 L2 (2048x2048) -> entry point
+ */
+public class DistanceGraph {
+    private static final int BATCH_SIZE = 4;
+    private static final int NODE_SIZE = 8;
+    
+    private final Map<Long, Node> roots = new ConcurrentHashMap<>();
+
+    private static class Node {
+        final int level;
+        final int x, z; // Level-space coordinates
+        long fullMask = 0;
+        final Map<Integer, Object> children = new ConcurrentHashMap<>();
+
+        Node(int level, int x, int z) {
+            this.level = level;
+            this.x = x;
+            this.z = z;
+        }
+
+        boolean isFull() { return fullMask == -1L; }
+    }
+
+    public void markChunkCompleted(int cx, int cz) {
+        int bx = Math.floorDiv(cx, BATCH_SIZE);
+        int bz = Math.floorDiv(cz, BATCH_SIZE);
+        int bit = (cx & 3) + ((cz & 3) << 2);
+
+        int rootSize = 512;
+        int rx = Math.floorDiv(bx, rootSize);
+        int rz = Math.floorDiv(bz, rootSize);
+        long rootKey = ChunkPos.asLong(rx, rz);
+
+        Node root = roots.computeIfAbsent(rootKey, k -> new Node(3, rx, rz));
+        recursiveMark(root, bx, bz, bit);
+    }
+
+    private void recursiveMark(Node node, int bx, int bz, int bit) {
+        int idx = getLocalIndex(node.level, bx, bz);
+        if ((node.fullMask & (1L << idx)) != 0) return;
+
+        if (node.level == 1) {
+            Integer mask = (Integer) node.children.getOrDefault(idx, 0);
+            mask |= (1 << bit);
+            if (mask == 0xFFFF) {
+                synchronized(node) {
+                    node.fullMask |= (1L << idx);
+                    node.children.remove(idx);
+                }
+            } else {
+                node.children.put(idx, mask);
+            }
+        } else {
+            Node child = (Node) node.children.computeIfAbsent(idx, k -> {
+                int cx = (node.x << NODE_SIZE) + (k & 0x7);
+                int cz = (node.z << NODE_SIZE) + (k >> 3);
+                return new Node(node.level - 1, cx, cz);
+            });
+            recursiveMark(child, bx, bz, bit);
+            if (child.isFull()) {
+                synchronized(node) {
+                    node.fullMask |= (1L << idx);
+                    node.children.remove(idx);
+                }
+            }
+        }
+    }
+
+    public List<ChunkPos> findWork(ChunkPos center, int radiusChunks, Set<Long> trackedBatches) {
+        int cbx = Math.floorDiv(center.x, BATCH_SIZE);
+        int cbz = Math.floorDiv(center.z, BATCH_SIZE);
+        int rb = (radiusChunks + 3) / BATCH_SIZE;
+
+        PriorityQueue<WorkItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
+
+        int rootSize = 512;
+        int rbxMin = Math.floorDiv(cbx - rb, rootSize);
+        int rbxMax = Math.floorDiv(cbx + rb, rootSize);
+        int rbzMin = Math.floorDiv(cbz - rb, rootSize);
+        int rbzMax = Math.floorDiv(cbz + rb, rootSize);
+
+        for (int rx = rbxMin; rx <= rbxMax; rx++) {
+            for (int rz = rbzMin; rz <= rbzMax; rz++) {
+                Node root = roots.get(ChunkPos.asLong(rx, rz));
+                // check empty space even if node is null
+                double dSq = getDistSq(rx, rz, rootSize, cbx, cbz);
+                if (dSq <= (rb + rootSize) * (rb + rootSize)) {
+                    queue.add(new WorkItem(root, 3, rx, rz, dSq));
+                }
+            }
+        }
+
+        while (!queue.isEmpty()) {
+            WorkItem item = queue.poll();
+            if (item.node != null && item.node.isFull()) continue;
+
+            if (item.level == 0) {
+                // found a batch
+                long key = ChunkPos.asLong(item.x, item.z);
+                if (trackedBatches.add(key)) {
+                    List<ChunkPos> batch = new ArrayList<>(16);
+                    for (int lz = 0; lz < 4; lz++) {
+                        for (int lx = 0; lx < 4; lx++) {
+                            batch.add(new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz));
+                        }
+                    }
+                    return batch;
+                }
+                continue;
+            }
+
+            int childLevel = item.level - 1;
+            int childSize = 1 << (3 * childLevel);
+            
+            for (int i = 0; i < 64; i++) {
+                if (item.node != null && (item.node.fullMask & (1L << i)) != 0) continue;
+
+                int cx = (item.x << 3) + (i & 7);
+                int cz = (item.z << 3) + (i >> 3);
+                
+                double dSq = getDistSq(cx, cz, childSize, cbx, cbz);
+                if (dSq <= (rb + childSize) * (rb + childSize)) {
+                    Object child = (item.node == null) ? null : item.node.children.get(i);
+                    Node childNode = (child instanceof Node) ? (Node) child : null;
+                    queue.add(new WorkItem(childNode, childLevel, cx, cz, dSq));
+                }
+            }
+        }
+        return null;
+    }
+
+    private double getDistSq(int nx, int nz, int size, int cbx, int cbz) {
+        // distance to nearest edge of node
+        double dx = Math.max(0, Math.max(nx * size - cbx, cbx - (nx + 1) * size + 1));
+        double dz = Math.max(0, Math.max(nz * size - cbz, cbz - (nz + 1) * size + 1));
+        return dx * dx + dz * dz;
+    }
+
+    private int getLocalIndex(int level, int bx, int bz) {
+        int shift = (level - 1) * 3;
+        int lx = Math.floorMod(Math.floorDiv(bx, 1 << shift), 8);
+        int lz = Math.floorMod(Math.floorDiv(bz, 1 << shift), 8);
+        return lx + (lz << 3);
+    }
+
+    public int countMissingInRange(ChunkPos center, int radiusChunks) {
+        int cbx = Math.floorDiv(center.x, 4);
+        int cbz = Math.floorDiv(center.z, 4);
+        int rb = (radiusChunks + 3) / 4;
+
+        int rootSize = 512;
+        int rbxMin = Math.floorDiv(cbx - rb, rootSize);
+        int rbxMax = Math.floorDiv(cbx + rb, rootSize);
+        int rbzMin = Math.floorDiv(cbz - rb, rootSize);
+        int rbzMax = Math.floorDiv(cbz + rb, rootSize);
+
+        int count = 0;
+        for (int rx = rbxMin; rx <= rbxMax; rx++) {
+            for (int rz = rbzMin; rz <= rbzMax; rz++) {
+                Node root = roots.get(ChunkPos.asLong(rx, rz));
+                count += recursiveCount(root, 3, rx, rz, cbx, cbz, rb);
+            }
+        }
+        return count;
+    }
+
+    private int recursiveCount(Node node, int level, int nx, int nz, int cbx, int cbz, int rb) {
+        int size = 1 << (3 * level);
+        if (getDistSq(nx, nz, size, cbx, cbz) > rb * rb) return 0;
+        if (node != null && node.isFull()) return 0;
+
+        if (level == 0) return 1; // batch
+
+        if (node == null) {
+            // estimate chunks in circle inside empty node
+            if (level == 1) {
+                int c = 0;
+                for (int i = 0; i < 64; i++) {
+                    int bx = (nx << 3) + (i & 7);
+                    int bz = (nz << 3) + (i >> 3);
+                    if (getDistSq(bx, bz, 1, cbx, cbz) <= rb * rb) c += 16;
+                }
+                return c;
+            }
+            // higher level, recurse null node
+            int c = 0;
+            for (int i = 0; i < 64; i++) {
+                int cx = (nx << 3) + (i & 7);
+                int cz = (nz << 3) + (i >> 3);
+                c += recursiveCount(null, level - 1, cx, cz, cbx, cbz, rb);
+            }
+            return c;
+        }
+
+        // L1 partial
+        if (level == 1) {
+            int c = 0;
+            for (int i = 0; i < 64; i++) {
+                if ((node.fullMask & (1L << i)) != 0) continue;
+                int bx = (nx << 3) + (i & 7);
+                int bz = (nz << 3) + (i >> 3);
+                if (getDistSq(bx, bz, 1, cbx, cbz) <= rb * rb) {
+                    Integer mask = (Integer) node.children.getOrDefault(i, 0);
+                    c += (16 - Integer.bitCount(mask));
+                }
+            }
+            return c;
+        }
+
+        // higher level partial
+        int c = 0;
+        for (int i = 0; i < 64; i++) {
+            if ((node.fullMask & (1L << i)) != 0) continue;
+            int cx = (nx << 3) + (i & 7);
+            int cz = (nz << 3) + (i >> 3);
+            Object child = node.children.get(i);
+            Node childNode = (child instanceof Node) ? (Node) child : null;
+            c += recursiveCount(childNode, level - 1, cx, cz, cbx, cbz, rb);
+        }
+        return c;
+    }
+
+    private static class WorkItem {
+        final Node node;
+        final int level;
+        final int x, z;
+        final double distSq;
+        WorkItem(Node node, int level, int x, int z, double distSq) {
+            this.node = node; this.level = level; this.x = x; this.z = z; this.distSq = distSq;
+        }
+    }
+
+    public static long getBatchKey(int cx, int cz) {
+        return ChunkPos.asLong(Math.floorDiv(cx, 4), Math.floorDiv(cz, 4));
+    }
+}

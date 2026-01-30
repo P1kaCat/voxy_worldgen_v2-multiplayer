@@ -19,6 +19,7 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -41,11 +42,14 @@ public final class ChunkGenerationManager {
     
     // components
     private final TpsMonitor tpsMonitor = new TpsMonitor();
-    private final ChunkScanner scanner = new ChunkScanner();
+    private final DistanceGraph distanceGraph = new DistanceGraph();
+    private final Set<Long> trackedBatches = ConcurrentHashMap.newKeySet();
+    private final Map<Long, AtomicInteger> batchCounters = new ConcurrentHashMap<>();
     private Semaphore throttle;
     private MinecraftServer server;
     private ResourceKey<Level> currentDimensionKey = null;
     private ServerLevel currentLevel = null;
+    private ChunkPos lastPlayerPos = null;
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
     
     // worker
@@ -61,7 +65,7 @@ public final class ChunkGenerationManager {
     public void initialize(MinecraftServer server) {
         this.server = server;
         this.running.set(true);
-        // default pause check: assume unpaused unless configured otherwise (e.g. by client mod)
+        // unpaused by default
         this.pauseCheck = () -> false; 
         Config.load();
         this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
@@ -79,12 +83,13 @@ public final class ChunkGenerationManager {
         
         trackedChunks.clear();
         completedChunks.clear();
+        trackedBatches.clear();
+        batchCounters.clear();
         server = null;
         stats.reset();
         activeTaskCount.set(0);
         remainingInRadius.set(0);
         tpsMonitor.reset();
-        scanner.stop();
         currentDimensionKey = null;
         currentLevel = null;
     }
@@ -105,60 +110,50 @@ public final class ChunkGenerationManager {
     }
 
     private void workerLoop() {
-        List<ChunkPos> batch = new ArrayList<>(64);
-        
         while (workerRunning.get() && running.get()) {
             try {
-                if (server == null || currentLevel == null || !scanner.hasNext()) {
+                if (server == null || currentLevel == null) {
                     Thread.sleep(100);
                     continue;
                 }
 
-                if (tpsMonitor.isThrottled()) {
-                    Thread.sleep(500);
-                    continue;
-                }
-
-                if (pauseCheck.getAsBoolean()) {
+                if (tpsMonitor.isThrottled() || pauseCheck.getAsBoolean()) {
                     Thread.sleep(500);
                     continue;
                 }
                 
-                // 1. fill batch with candidates
-                batch.clear();
-                for (int i = 0; i < 64 && scanner.hasNext(); i++) {
-                    ChunkPos pos = scanner.next();
-                    if (pos == null) break;
-                    
-                    if (completedChunks.contains(pos.toLong())) {
-                        remainingInRadius.decrementAndGet();
-                        continue; // skip locally known chunks
-                    }
-                    batch.add(pos);
+                var players = PlayerTracker.getInstance().getPlayers();
+                if (players.isEmpty()) {
+                    Thread.sleep(1000);
+                    continue;
+                }
+                ChunkPos center = players.iterator().next().chunkPosition();
+
+                // get next batch
+                List<ChunkPos> batch = distanceGraph.findWork(center, Config.DATA.generationRadius, trackedBatches);
+                
+                if (batch == null) {
+                    Thread.sleep(100);
+                    continue;
                 }
                 
-                if (batch.isEmpty()) {
-                    continue; // scanner might have finished or all were completed
-                }
+                long batchKey = DistanceGraph.getBatchKey(batch.get(0).x, batch.get(0).z);
+                batchCounters.put(batchKey, new AtomicInteger(batch.size()));
 
-                // 2. filter batch on main thread (safe hasChunk check)
-                // we use a join here to backpressure the worker so it doesn't spin too fast
+                // filter batch on main thread
                 CompletableFuture<List<ChunkPos>> filterTask = CompletableFuture.supplyAsync(() -> {
                     List<ChunkPos> toGenerate = new ArrayList<>();
-                    if (currentLevel == null) return toGenerate; // safety check
+                    if (currentLevel == null) return toGenerate;
                     
                     for (ChunkPos pos : batch) {
                         try {
                             if (currentLevel.hasChunk(pos.x, pos.z)) {
-                                completedChunks.add(pos.toLong());
-                                stats.incrementSkipped();
-                                remainingInRadius.decrementAndGet();
+                                onSuccess(pos); // already exists
                             } else {
                                 toGenerate.add(pos);
                             }
                         } catch (Exception e) {
-                            // if check fails, assume we need to process it to be safe, or skip?
-                            // safe to skip effectively to avoid crashing
+                            toGenerate.add(pos);
                         }
                     }
                     return toGenerate;
@@ -166,17 +161,20 @@ public final class ChunkGenerationManager {
 
                 List<ChunkPos> toGenerate = filterTask.join();
                 
-                // 3. submit generation tasks
+                if (toGenerate.isEmpty()) {
+                    // all skipped, cleanup
+                    trackedBatches.remove(batchKey);
+                    batchCounters.remove(batchKey);
+                    continue;
+                }
+
+                // submit tasks
                 for (ChunkPos pos : toGenerate) {
                     if (!workerRunning.get()) break;
-                    
-                    // acquire permit
                     throttle.acquire();
-                    
-                    if (processChunk(pos)) {
-                        // submitted
-                    } else {
+                    if (!processChunk(pos)) {
                         throttle.release();
+                        onFailure(pos); // mark as failed to decremement batch counter
                     }
                 }
 
@@ -185,7 +183,7 @@ public final class ChunkGenerationManager {
                 break;
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("error in generation worker", e);
-                try { Thread.sleep(1000); } catch (InterruptedException ignored) {} // prevent loop spam on error
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
             }
         }
     }
@@ -214,6 +212,10 @@ public final class ChunkGenerationManager {
         if (configReloadScheduled.compareAndSet(true, false)) {
             Config.load();
             updateThrottleCapacity();
+            var players = PlayerTracker.getInstance().getPlayers();
+            if (!players.isEmpty()) {
+                restartScan(players.iterator().next().chunkPosition());
+            }
         }
         
         tpsMonitor.tick();
@@ -232,9 +234,10 @@ public final class ChunkGenerationManager {
              setupLevel((ServerLevel) player.level());
         }
 
-        // update scanner if moved significantly
-        if (scanner.getCenter() == null || currentPos.getChessboardDistance(scanner.getCenter()) > 16) {
-             restartScan(currentPos);
+        // update radius stats if moved
+        if (lastPlayerPos == null || !lastPlayerPos.equals(currentPos)) {
+            lastPlayerPos = currentPos;
+            restartScan(currentPos);
         }
     }
 
@@ -247,19 +250,24 @@ public final class ChunkGenerationManager {
         currentDimensionKey = newLevel.dimension();
         completedChunks.clear();
         trackedChunks.clear();
+        trackedBatches.clear();
+        batchCounters.clear();
         ChunkPersistence.load(newLevel, currentDimensionKey, completedChunks);
+        
+        // populate distance graph
+        for (long pos : completedChunks) {
+            distanceGraph.markChunkCompleted(ChunkPos.getX(pos), ChunkPos.getZ(pos));
+        }
+        
+        var players = PlayerTracker.getInstance().getPlayers();
+        if (!players.isEmpty()) {
+            restartScan(players.iterator().next().chunkPosition());
+        }
     }
     
     private void restartScan(ChunkPos center) {
-        scanner.stop();
-        // clear tracked for new radius to allow retrying dropped tasks if any
-        trackedChunks.clear(); 
-        
         int radius = Config.DATA.generationRadius;
-        long totalArea = (long) (2 * radius + 1) * (2 * radius + 1);
-        remainingInRadius.set((int) totalArea);
-        
-        scanner.start(center, radius);
+        remainingInRadius.set(distanceGraph.countMissingInRange(center, radius));
     }
 
     private void updateThrottleCapacity() {
@@ -284,12 +292,12 @@ public final class ChunkGenerationManager {
         ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
             .whenCompleteAsync((result, throwable) -> {
                 if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
-                    onSuccess(chunk);
+                    onSuccess(pos);
                     // offload voxy ingestion
                     CompletableFuture.runAsync(() -> VoxyIntegration.ingestChunk(chunk))
                         .whenComplete((v, t) -> cleanupTask(cache, pos));
                 } else {
-                    onFailure();
+                    onFailure(pos);
                     cleanupTask(cache, pos);
                 }
             }, server);
@@ -304,15 +312,32 @@ public final class ChunkGenerationManager {
         });
     }
     
-    private void onSuccess(LevelChunk chunk) {
-        completedChunks.add(chunk.getPos().toLong());
-        stats.incrementCompleted();
-        remainingInRadius.decrementAndGet();
+    private void onSuccess(ChunkPos pos) {
+        long key = pos.toLong();
+        if (completedChunks.add(key)) {
+            stats.incrementCompleted();
+            distanceGraph.markChunkCompleted(pos.x, pos.z);
+            remainingInRadius.decrementAndGet();
+        } else {
+            stats.incrementSkipped();
+        }
+        decrementBatch(pos);
     }
     
-    private void onFailure() {
+    private void onFailure(ChunkPos pos) {
         stats.incrementFailed();
+        // decrement so it counts as attempted
         remainingInRadius.decrementAndGet();
+        decrementBatch(pos);
+    }
+
+    private void decrementBatch(ChunkPos pos) {
+        long batchKey = DistanceGraph.getBatchKey(pos.x, pos.z);
+        AtomicInteger counter = batchCounters.get(batchKey);
+        if (counter != null && counter.decrementAndGet() <= 0) {
+            trackedBatches.remove(batchKey);
+            batchCounters.remove(batchKey);
+        }
     }
     
     private void completeTask(ChunkPos pos) {
@@ -329,7 +354,7 @@ public final class ChunkGenerationManager {
     public int getActiveTaskCount() { return activeTaskCount.get(); }
     public int getRemainingInRadius() { return remainingInRadius.get(); }
     public boolean isThrottled() { return tpsMonitor.isThrottled(); }
-    public int getQueueSize() { return 0; } // queue is now implicit in the worker thread
+    public int getQueueSize() { return 0; } // implicit in worker
     
     public void setPauseCheck(java.util.function.BooleanSupplier check) {
         this.pauseCheck = check;
