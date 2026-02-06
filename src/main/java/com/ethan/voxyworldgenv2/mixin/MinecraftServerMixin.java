@@ -18,26 +18,13 @@ public abstract class MinecraftServerMixin implements MinecraftServerExtension {
     @Shadow
     public abstract Iterable<ServerLevel> getAllLevels();
 
-    @Unique
-    private final AtomicBoolean needHousekeeping = new AtomicBoolean(false);
-
-    @Inject(method = "tickServer", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/MinecraftServer;tickConnection()V"))
-    private void voxyworldgen$onTick(BooleanSupplier booleanSupplier, CallbackInfo ci) {
-        this.voxyworldgen$runHousekeeping(booleanSupplier);
-    }
-
     @Override
     public void voxyworldgen$runHousekeeping(BooleanSupplier haveTime) {
-        if (this.needHousekeeping.compareAndSet(true, false)) {
-            for (ServerLevel level : this.getAllLevels()) {
-                ((ChunkMapMixin) level.getChunkSource().chunkMap).invokeTick(haveTime);
-                ((ServerLevelMixin) level).getEntityManager().tick();
-            }
-        }
+        // removed to prevent conflicts with async/c2me mods
     }
 
     @Override
     public void voxyworldgen$markHousekeeping() {
-        this.needHousekeeping.set(true);
+        // no longer used
     }
 }

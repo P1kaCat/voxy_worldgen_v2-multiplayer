@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -61,6 +62,10 @@ public final class ChunkGenerationManager {
     // worker
     private Thread workerThread;
     private final AtomicBoolean workerRunning = new AtomicBoolean(false);
+    
+    // c2me compatibility - queue ticket operations to process at safe time
+    private record TicketOp(ChunkPos pos, boolean add) {}
+    private final ConcurrentLinkedQueue<TicketOp> pendingTicketOps = new ConcurrentLinkedQueue<>();
 
     private ChunkGenerationManager() {}
     
@@ -165,13 +170,27 @@ public final class ChunkGenerationManager {
                     continue;
                 }
 
-                // dispatch tasks
+                // dispatch tasks - use tryAcquire to avoid deadlock when batch size > maxActiveTasks
                 List<ChunkPos> readyToGenerate = new ArrayList<>();
+                int processedCount = 0;
                 for (ChunkPos pos : preFiltered) {
                     if (!workerRunning.get()) break;
                     
-                    throttle.acquire();
+                    // try to acquire with short timeout to avoid blocking forever
+                    boolean acquired = false;
+                    try {
+                        acquired = throttle.tryAcquire(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                     
+                    if (!acquired) {
+                        // couldn't get permit, dispatch what we have so far
+                        break;
+                    }
+                    
+                    processedCount++;
                     if (trackedChunks.add(pos.toLong())) {
                         activeTaskCount.incrementAndGet();
                         stats.incrementQueued();
@@ -190,6 +209,12 @@ public final class ChunkGenerationManager {
                         onFailure(pos);
                     }
                 }
+                
+                // if we couldn't process all chunks in batch, remove from tracking to allow retry
+                if (processedCount < preFiltered.size()) {
+                    trackedBatches.remove(batchKey);
+                    batchCounters.remove(batchKey);
+                }
 
                 if (!readyToGenerate.isEmpty()) {
                     server.execute(() -> {
@@ -203,6 +228,11 @@ public final class ChunkGenerationManager {
                         
                         for (ChunkPos pos : readyToGenerate) {
                             if (currentLevel.hasChunk(pos.x, pos.z)) {
+                                // chunk already loaded by vanilla - still ingest to voxy
+                                LevelChunk existingChunk = currentLevel.getChunk(pos.x, pos.z);
+                                if (existingChunk != null && !existingChunk.isEmpty()) {
+                                    VoxyIntegration.ingestChunk(existingChunk);
+                                }
                                 onSuccess(pos);
                                 completeTask(pos);
                             } else if (tellusActive) {
@@ -216,28 +246,34 @@ public final class ChunkGenerationManager {
                                 }
                                 completeTask(pos);
                             } else {
-                                cache.addTicketWithRadius(TicketType.FORCED, pos, 0);
+                                // queue ticket add for next tick (c2me safe)
+                                queueTicketAdd(pos);
                                 actuallyGenerate.add(pos);
                             }
                         }
                         
+                        // tickets will be processed in next tick() call
+                        // schedule chunk generation after ticket is applied
                         if (!actuallyGenerate.isEmpty()) {
-                            ((ServerChunkCacheMixin) cache).invokeRunDistanceManagerUpdates();
-                            
-                            for (ChunkPos pos : actuallyGenerate) {
-                                ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
-                                    .whenCompleteAsync((result, throwable) -> {
-                                        if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
-                                            onSuccess(pos);
-                                            if (!chunk.isEmpty()) {
-                                                VoxyIntegration.ingestChunk(chunk);
+                            server.execute(() -> {
+                                if (currentLevel == null) return;
+                                ServerChunkCache c = currentLevel.getChunkSource();
+                                
+                                for (ChunkPos pos : actuallyGenerate) {
+                                    ((ServerChunkCacheMixin) c).invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
+                                        .whenCompleteAsync((result, throwable) -> {
+                                            if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
+                                                onSuccess(pos);
+                                                if (!chunk.isEmpty()) {
+                                                    VoxyIntegration.ingestChunk(chunk);
+                                                }
+                                            } else {
+                                                onFailure(pos);
                                             }
-                                        } else {
-                                            onFailure(pos);
-                                        }
-                                        server.execute(() -> cleanupTask(cache, pos));
-                                    }, server);
-                            }
+                                            cleanupTask(c, pos);
+                                        }, server);
+                                }
+                            });
                         }
                     });
                 }
@@ -254,6 +290,9 @@ public final class ChunkGenerationManager {
 
     public void tick() {
         if (!running.get() || server == null) return;
+        
+        // process pending ticket operations at safe point before c2me parallelizes
+        processPendingTickets();
         
         if (configReloadScheduled.compareAndSet(true, false)) {
             Config.load();
@@ -329,22 +368,54 @@ public final class ChunkGenerationManager {
 
     private void updateThrottleCapacity() {
         int target = Config.DATA.maxActiveTasks;
-        int current = throttle.availablePermits() + activeTaskCount.get();
-        if (current != target) {
-             int diff = target - current;
-             if (diff > 0) throttle.release(diff);
-             else throttle.tryAcquire(-diff);
+        // only increase capacity, never decrease (to avoid blocking)
+        // decreased capacity takes effect naturally as tasks complete
+        int available = throttle.availablePermits();
+        int maxPossible = available + activeTaskCount.get();
+        if (target > maxPossible) {
+            throttle.release(target - maxPossible);
         }
     }
     
-    private void cleanupTask(ServerChunkCache cache, ChunkPos pos) {
-        server.execute(() -> {
-            cache.removeTicketWithRadius(TicketType.FORCED, pos, 0);
-            ((MinecraftServerExtension) server).voxyworldgen$markHousekeeping();
-            ((MinecraftServerAccess) server).setEmptyTicks(0);
-            completeTask(pos);
-        });
+    // c2me compatibility: process all queued ticket operations at a single safe point
+    private void processPendingTickets() {
+        if (currentLevel == null) {
+            pendingTicketOps.clear();
+            return;
+        }
+        
+        ServerChunkCache cache = currentLevel.getChunkSource();
+        boolean processed = false;
+        TicketOp op;
+        while ((op = pendingTicketOps.poll()) != null) {
+            processed = true;
+            if (op.add()) {
+                cache.addTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+            } else {
+                cache.removeTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+            }
+        }
+        
+        // run distance manager updates once after batch processing
+        if (processed) {
+            ((ServerChunkCacheMixin) cache).invokeRunDistanceManagerUpdates();
+        }
     }
+    
+    private void queueTicketAdd(ChunkPos pos) {
+        pendingTicketOps.add(new TicketOp(pos, true));
+    }
+    
+    private void queueTicketRemove(ChunkPos pos) {
+        pendingTicketOps.add(new TicketOp(pos, false));
+    }
+    
+    private void cleanupTask(ServerChunkCache cache, ChunkPos pos) {
+        queueTicketRemove(pos);
+        ((MinecraftServerAccess) server).setEmptyTicks(0);
+        completeTask(pos);
+    }
+
     
     private void onSuccess(ChunkPos pos) {
         long key = pos.toLong();
