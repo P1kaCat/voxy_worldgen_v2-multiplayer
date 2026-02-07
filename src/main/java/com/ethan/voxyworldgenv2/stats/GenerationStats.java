@@ -28,16 +28,29 @@ public class GenerationStats {
     public synchronized void tick() {
         long now = System.currentTimeMillis();
         // shift history once per second
-        if (now - lastTickTime >= 1000) {
+            long secondsPassed = (now - lastTickTime) / 1000;
+            if (secondsPassed < 1) return; // should not happen given the if check, but safety
+            
             long currentTotal = chunksCompleted.get() + chunksSkipped.get();
             long delta = currentTotal - lastCompletedCount;
             
-            rollingHistory[historyIndex] = delta;
-            historyIndex = (historyIndex + 1) % rollingHistory.length;
+            long perSecond = delta / secondsPassed;
+            long remainder = delta % secondsPassed;
+            
+            // limit updates to history length
+            int updateCount = (int) Math.min(secondsPassed, rollingHistory.length);
+            
+            for (int i = 0; i < updateCount; i++) {
+                // distribute remainder
+                long val = perSecond + (i < remainder ? 1 : 0);
+                rollingHistory[historyIndex] = val;
+                historyIndex = (historyIndex + 1) % rollingHistory.length;
+            }
+            
+            // history buffer will be fully overwritten if secondsPassed >= length
             
             lastCompletedCount = currentTotal;
-            lastTickTime = now;
-        }
+            lastTickTime += secondsPassed * 1000;
     }
 
     public synchronized double getChunksPerSecond() {

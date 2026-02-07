@@ -21,7 +21,7 @@ public class DistanceGraph {
     private static class Node {
         final int level;
         final int x, z; // level-space coords
-        long fullMask = 0;
+        volatile long fullMask = 0;
         final Map<Integer, Object> children = new ConcurrentHashMap<>();
 
         Node(int level, int x, int z) {

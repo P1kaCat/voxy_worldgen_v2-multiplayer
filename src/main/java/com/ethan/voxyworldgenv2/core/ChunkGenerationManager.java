@@ -425,6 +425,7 @@ public final class ChunkGenerationManager {
             remainingInRadius.decrementAndGet();
         } else {
             stats.incrementSkipped();
+            distanceGraph.markChunkCompleted(pos.x, pos.z);
         }
         decrementBatch(pos);
     }
