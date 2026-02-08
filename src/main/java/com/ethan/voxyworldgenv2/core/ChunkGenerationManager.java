@@ -2,7 +2,9 @@ package com.ethan.voxyworldgenv2.core;
 
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.ethan.voxyworldgenv2.integration.VoxyIntegration;
+import com.ethan.voxyworldgenv2.integration.tellus.TellusIntegration;
 import com.ethan.voxyworldgenv2.mixin.MinecraftServerAccess;
+
 import com.ethan.voxyworldgenv2.mixin.ServerChunkCacheMixin;
 import com.ethan.voxyworldgenv2.stats.GenerationStats;
 import net.minecraft.resources.ResourceKey;
@@ -57,7 +59,8 @@ public final class ChunkGenerationManager {
     private ChunkPos lastPlayerPos = null;
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
     private boolean tellusActive = false;
-    private final Map<Long, com.ethan.voxyworldgenv2.integration.TellusIntegration.TellusChunkData> tellusPendingHeights = new ConcurrentHashMap<>();
+
+
     
     // worker
     private Thread workerThread;
@@ -196,11 +199,11 @@ public final class ChunkGenerationManager {
                         stats.incrementQueued();
                         
                         if (tellusActive) {
-                            // sample data for tellus on worker thread
-                            var data = com.ethan.voxyworldgenv2.integration.TellusIntegration.sampleData(currentLevel, pos);
-                            if (data != null) {
-                                tellusPendingHeights.put(pos.toLong(), data);
-                            }
+                            TellusIntegration.enqueueGenerate(currentLevel, pos, () -> {
+                                onSuccess(pos);
+                                completeTask(pos);
+                            });
+                            continue;
                         }
                         
                         readyToGenerate.add(pos);
@@ -234,16 +237,6 @@ public final class ChunkGenerationManager {
                                     VoxyIntegration.ingestChunk(existingChunk);
                                 }
                                 onSuccess(pos);
-                                completeTask(pos);
-                            } else if (tellusActive) {
-                                // fast path for tellus
-                                var data = tellusPendingHeights.remove(pos.toLong());
-                                if (data != null) {
-                                    com.ethan.voxyworldgenv2.integration.TellusIntegration.generateFromHeights(currentLevel, pos, data);
-                                    onSuccess(pos);
-                                } else {
-                                    onFailure(pos);
-                                }
                                 completeTask(pos);
                             } else {
                                 // queue ticket add for next tick (c2me safe)
@@ -339,7 +332,8 @@ public final class ChunkGenerationManager {
         
         currentLevel = newLevel;
         currentDimensionKey = newLevel.dimension();
-        tellusActive = com.ethan.voxyworldgenv2.integration.TellusIntegration.isTellusWorld(newLevel);
+        tellusActive = TellusIntegration.isTellusWorld(newLevel);
+
         
         if (tellusActive) {
             VoxyWorldGenV2.LOGGER.info("tellus world detected, enabling fast generation");
