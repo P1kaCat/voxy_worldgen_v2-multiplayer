@@ -22,6 +22,8 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.longs.LongSets;
 
+import java.util.UUID;
+import java.util.HashSet;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Set;
@@ -56,7 +58,7 @@ public final class ChunkGenerationManager {
     private MinecraftServer server;
     private ResourceKey<Level> currentDimensionKey = null;
     private ServerLevel currentLevel = null;
-    private ChunkPos lastPlayerPos = null;
+    private final java.util.Map<java.util.UUID, ChunkPos> lastPlayerPositions = new java.util.concurrent.ConcurrentHashMap<>();
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
     private boolean tellusActive = false;
 
@@ -74,6 +76,9 @@ public final class ChunkGenerationManager {
     
     public static ChunkGenerationManager getInstance() {
         return INSTANCE;
+    }
+    public ServerLevel getCurrentLevel() {
+        return currentLevel;
     }
     
     public void initialize(MinecraftServer server) {
@@ -136,19 +141,43 @@ public final class ChunkGenerationManager {
                     continue;
                 }
                 
-                var players = PlayerTracker.getInstance().getPlayers();
+                var players = new ArrayList<>(PlayerTracker.getInstance().getPlayers());
                 if (players.isEmpty()) {
                     Thread.sleep(1000);
                     continue;
                 }
-                ChunkPos center = players.iterator().next().chunkPosition();
-
+                
                 int radius = tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
-
-                // get next batch
-                List<ChunkPos> batch = distanceGraph.findWork(center, radius, trackedBatches);
+                List<ChunkPos> batch = null;
+                
+                // try to find work around any player
+                for (ServerPlayer player : players) {
+                    batch = distanceGraph.findWork(player.chunkPosition(), radius, trackedBatches);
+                    if (batch != null) break;
+                }
                 
                 if (batch == null) {
+                    // if no generation work, try to catch up on syncing for any player
+                    List<ChunkPos> syncBatch = new ArrayList<>();
+                    for (ServerPlayer player : players) {
+                        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+                        if (synced == null) continue;
+                        
+                        distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, synced, syncBatch, 64);
+                        if (!syncBatch.isEmpty()) {
+                            for (ChunkPos syncPos : syncBatch) {
+                                LevelChunk c = currentLevel.getChunkSource().getChunk(syncPos.x, syncPos.z, false);
+                                if (c != null) {
+                                    com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(player, c);
+                                }
+                            }
+                        }
+                        
+                        if (!syncBatch.isEmpty()) break;
+                    }
+                    
+                    if (!syncBatch.isEmpty()) continue; // skip sleep if we processed work
+                    
                     Thread.sleep(100);
                     continue;
                 }
@@ -235,6 +264,7 @@ public final class ChunkGenerationManager {
                                 LevelChunk existingChunk = currentLevel.getChunk(pos.x, pos.z);
                                 if (existingChunk != null && !existingChunk.isEmpty()) {
                                     VoxyIntegration.ingestChunk(existingChunk);
+                                    com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
                                 }
                                 onSuccess(pos);
                                 completeTask(pos);
@@ -259,6 +289,7 @@ public final class ChunkGenerationManager {
                                                 onSuccess(pos);
                                                 if (!chunk.isEmpty()) {
                                                     VoxyIntegration.ingestChunk(chunk);
+                                                    com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
                                                 }
                                             } else {
                                                 onFailure(pos);
@@ -292,30 +323,56 @@ public final class ChunkGenerationManager {
             updateThrottleCapacity();
             var players = PlayerTracker.getInstance().getPlayers();
             if (!players.isEmpty()) {
-                restartScan(players.iterator().next().chunkPosition());
+                restartScan();
             }
         }
         
         tpsMonitor.tick();
         stats.tick();
         checkPlayerMovement();
+        
+        // broadcast changes
+        ChunkUpdateTracker.getInstance().processDirty(currentLevel);
     }
     
     private void checkPlayerMovement() {
         var players = PlayerTracker.getInstance().getPlayers();
-        if (players.isEmpty()) return;
-
-        ServerPlayer player = players.iterator().next();
-        ChunkPos currentPos = player.chunkPosition();
-        
-        if (player.level() != currentLevel) {
-             setupLevel((ServerLevel) player.level());
+        if (players.isEmpty()) {
+            if (!lastPlayerPositions.isEmpty()) {
+                lastPlayerPositions.clear();
+                remainingInRadius.set(0);
+            }
+            return;
         }
 
-        // rescan if player moved significantly
-        if (lastPlayerPos == null || distSq(lastPlayerPos, currentPos) >= 4) {
-            lastPlayerPos = currentPos;
-            restartScan(currentPos);
+        boolean shouldRescan = false;
+        
+        // check for new players, removed players, or significant movement
+        Set<java.util.UUID> currentPlayerIds = new java.util.HashSet<>();
+        for (ServerPlayer player : players) {
+            currentPlayerIds.add(player.getUUID());
+            ChunkPos currentPos = player.chunkPosition();
+            ChunkPos lastPos = lastPlayerPositions.get(player.getUUID());
+            
+            if (lastPos == null || distSq(lastPos, currentPos) >= 4) {
+                lastPlayerPositions.put(player.getUUID(), currentPos);
+                shouldRescan = true;
+            }
+            
+            if (player.level() != currentLevel) {
+                 setupLevel((ServerLevel) player.level());
+                 return; // setupLevel will call restartScan
+            }
+        }
+        
+        // clean up players who left
+        if (lastPlayerPositions.size() > currentPlayerIds.size()) {
+            lastPlayerPositions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
+            shouldRescan = true;
+        }
+
+        if (shouldRescan) {
+            restartScan();
         }
     }
 
@@ -351,13 +408,20 @@ public final class ChunkGenerationManager {
         
         var players = PlayerTracker.getInstance().getPlayers();
         if (!players.isEmpty()) {
-            restartScan(players.iterator().next().chunkPosition());
+            restartScan();
         }
     }
     
-    private void restartScan(ChunkPos center) {
+    private void restartScan() {
+        var players = PlayerTracker.getInstance().getPlayers();
+        if (players.isEmpty()) {
+            remainingInRadius.set(0);
+            return;
+        }
+        
         int radius = tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
-        remainingInRadius.set(distanceGraph.countMissingInRange(center, radius));
+        
+        remainingInRadius.set(distanceGraph.countMissingInRange(players.iterator().next().chunkPosition(), radius));
     }
 
     private void updateThrottleCapacity() {

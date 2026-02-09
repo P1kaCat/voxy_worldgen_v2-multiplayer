@@ -23,6 +23,7 @@ public final class ServerEventHandler {
     
     public static void onPlayerJoin(ServerGamePacketListenerImpl handler, PacketSender sender, MinecraftServer server) {
         PlayerTracker.getInstance().addPlayer(handler.getPlayer());
+        com.ethan.voxyworldgenv2.network.NetworkHandler.sendHandshake(handler.getPlayer());
     }
     
     public static void onPlayerDisconnect(ServerGamePacketListenerImpl handler, MinecraftServer server) {

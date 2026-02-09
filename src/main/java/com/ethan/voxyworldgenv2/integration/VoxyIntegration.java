@@ -117,7 +117,7 @@ public final class VoxyIntegration {
         }
     }
     
-    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
+    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer blockLight, net.minecraft.world.level.chunk.DataLayer skyLight) {
         if (!initialized) initialize();
         if (rawIngestMethod == null || worldIdentifierOfMethod == null) return;
 
@@ -125,10 +125,14 @@ public final class VoxyIntegration {
             Object worldId = worldIdentifierOfMethod.invoke(level);
             if (worldId == null) return;
             
-            rawIngestMethod.invoke(worldId, section, cx, cy, cz, null, skyLight);
+            rawIngestMethod.invoke(worldId, section, cx, cy, cz, blockLight, skyLight);
         } catch (Throwable e) {
             VoxyWorldGenV2.LOGGER.error("failed to raw ingest section", e);
         }
+    }
+
+    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
+        rawIngest(level, section, cx, cy, cz, null, skyLight);
     }
 
     public static boolean isVoxyAvailable() {

@@ -23,5 +23,18 @@ public class VoxyWorldGenV2Client implements ClientModInitializer {
             Minecraft mc = Minecraft.getInstance();
             return mc != null && mc.isPaused();
         });
+
+        // register network receivers
+        com.ethan.voxyworldgenv2.network.NetworkClientHandler.init();
+        
+        // reset connection state on disconnect
+        net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            com.ethan.voxyworldgenv2.network.NetworkState.setServerConnected(false);
+        });
+        
+        // tick network stats
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            com.ethan.voxyworldgenv2.network.NetworkState.tick();
+        });
     }
 }

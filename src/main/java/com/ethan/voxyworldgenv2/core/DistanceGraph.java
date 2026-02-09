@@ -175,6 +175,27 @@ public class DistanceGraph {
         return count;
     }
 
+    public void collectCompletedInRange(ChunkPos center, int radiusChunks, it.unimi.dsi.fastutil.longs.LongSet alreadySynced, List<ChunkPos> out, int maxResults) {
+        int cbx = center.x >> BATCH_SIZE_SHIFT;
+        int cbz = center.z >> BATCH_SIZE_SHIFT;
+        int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
+
+        int rootSize = 1 << ROOT_SIZE_SHIFT;
+        int rbxMin = (cbx - rb) >> ROOT_SIZE_SHIFT;
+        int rbxMax = (cbx + rb) >> ROOT_SIZE_SHIFT;
+        int rbzMin = (cbz - rb) >> ROOT_SIZE_SHIFT;
+        int rbzMax = (cbz + rb) >> ROOT_SIZE_SHIFT;
+
+        for (int rx = rbxMin; rx <= rbxMax; rx++) {
+            for (int rz = rbzMin; rz <= rbzMax; rz++) {
+                Node root = roots.get(ChunkPos.asLong(rx, rz));
+                if (root == null) continue;
+                recursiveCollectCompleted(root, 3, rx, rz, cbx, cbz, rb, alreadySynced, out, maxResults);
+                if (out.size() >= maxResults) return;
+            }
+        }
+    }
+
     private int recursiveCount(Node node, int level, int nx, int nz, int cbx, int cbz, int rb) {
         int size = 1 << (3 * level);
         if (getDistSq(nx, nz, size, cbx, cbz) > (double)rb * rb) return 0;
@@ -229,6 +250,65 @@ public class DistanceGraph {
             c += recursiveCount(childNode, level - 1, cx, cz, cbx, cbz, rb);
         }
         return c;
+    }
+
+    private void recursiveCollectCompleted(Node node, int level, int nx, int nz, int cbx, int cbz, int rb, it.unimi.dsi.fastutil.longs.LongSet alreadySynced, List<ChunkPos> out, int maxResults) {
+        if (out.size() >= maxResults) return;
+        int size = 1 << (3 * level);
+        if (getDistSq(nx, nz, size, cbx, cbz) > (double)rb * rb) return;
+
+        if (level == 0) return; 
+
+        if (level == 1) {
+            for (int i = 0; i < 64; i++) {
+                int bx = (nx << 3) + (i & 7);
+                int bz = (nz << 3) + (i >> 3);
+                if (getDistSq(bx, bz, 1, cbx, cbz) <= (double)rb * rb) {
+                    if (node != null && (node.fullMask & (1L << i)) != 0) {
+                        for (int lz = 0; lz < 4; lz++) {
+                            for (int lx = 0; lx < 4; lx++) {
+                                ChunkPos pos = new ChunkPos((bx << 2) + lx, (bz << 2) + lz);
+                                if (!alreadySynced.contains(pos.toLong())) {
+                                    out.add(pos);
+                                    if (out.size() >= maxResults) return;
+                                }
+                            }
+                        }
+                    } else if (node != null) {
+                        Object child = node.children.get(i);
+                        if (child instanceof Integer mask) {
+                            for (int m = 0; m < 16; m++) {
+                                if ((mask & (1 << m)) != 0) {
+                                    ChunkPos pos = new ChunkPos((bx << 2) + (m & 3), (bz << 2) + (m >> 2));
+                                    if (!alreadySynced.contains(pos.toLong())) {
+                                        out.add(pos);
+                                        if (out.size() >= maxResults) return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        for (int i = 0; i < 64; i++) {
+            int cx = (nx << 3) + (i & 7);
+            int cz = (nz << 3) + (i >> 3);
+            if (node == null) {
+                // if node is null, we can't have completed chunks in it
+                continue;
+            }
+            Object child = node.children.get(i);
+            if (child instanceof Node childNode) {
+                recursiveCollectCompleted(childNode, level - 1, cx, cz, cbx, cbz, rb, alreadySynced, out, maxResults);
+            } else if ((node.fullMask & (1L << i)) != 0) {
+                // node is full, but child is null? recurse with null node to check masks at l1
+                recursiveCollectCompleted(null, level - 1, cx, cz, cbx, cbz, rb, alreadySynced, out, maxResults);
+            }
+            if (out.size() >= maxResults) return;
+        }
     }
 
     private static class WorkItem {

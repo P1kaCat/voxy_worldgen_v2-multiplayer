@@ -54,15 +54,36 @@ public final class DebugRenderer {
             status = "§arunning";
         }
         
-        String[] lines = {
-            "§6[voxy worldgen v2] " + status,
-            "§7completed: §a" + formatNumber(stats.getCompleted()),
-            "§7skipped: §f" + formatNumber(stats.getSkipped()),
-            "§7remaining: §e" + formatNumber(remaining) + " §8(" + eta + ")",
-            "§7active: §b" + manager.getActiveTaskCount(),
-            "§7rate: §f" + String.format("%.1f", rate) + " c/s",
-            "§7voxy: " + (VoxyIntegration.isVoxyAvailable() ? "§aenabled" : "§cdisabled")
-        };
+        boolean isLocal = mc.getSingleplayerServer() != null;
+        boolean isVoxyServer = com.ethan.voxyworldgenv2.network.NetworkState.isServerConnected();
+        
+        java.util.List<String> lineList = new java.util.ArrayList<>();
+        
+        if (isLocal) {
+            // SINGLEPLAYER
+            lineList.add("§6[voxy worldgen v2] " + status);
+            lineList.add("§7completed: §a" + formatNumber(stats.getCompleted()));
+            lineList.add("§7skipped: §f" + formatNumber(stats.getSkipped()));
+            lineList.add("§7remaining: §e" + formatNumber(remaining) + " §8(" + eta + ")");
+            lineList.add("§7active: §b" + manager.getActiveTaskCount());
+            lineList.add("§7rate: §f" + String.format("%.1f", rate) + " c/s");
+            lineList.add("§7voxy: " + (VoxyIntegration.isVoxyAvailable() ? "§aenabled" : "§cdisabled"));
+        } else if (isVoxyServer) {
+            // MULTIPLAYER
+            double netRate = com.ethan.voxyworldgenv2.network.NetworkState.getReceiveRate();
+            double bwRate = com.ethan.voxyworldgenv2.network.NetworkState.getBandwidthRate();
+            lineList.add("§6[voxy worldgen v2] §aconnected");
+            lineList.add("§7rate: §f" + String.format("%.1f", netRate) + " c/s");
+            lineList.add("§7bandwidth: §f" + formatBytes((long) bwRate) + "/s");
+            lineList.add("§7received: §b" + formatNumber(com.ethan.voxyworldgenv2.network.NetworkState.getChunksReceived()) + " §8(" + formatBytes(com.ethan.voxyworldgenv2.network.NetworkState.getBytesReceived()) + ")");
+            lineList.add("§7voxy: " + (VoxyIntegration.isVoxyAvailable() ? "§aenabled" : "§cdisabled"));
+        } else {
+            // MULTIPLAYER
+            lineList.add("§6[voxy worldgen v2] §7voxy-server: §coffline");
+            lineList.add("§7voxy: " + (VoxyIntegration.isVoxyAvailable() ? "§aenabled" : "§cdisabled"));
+        }
+        
+        String[] lines = lineList.toArray(new String[0]);
         
         int y = screenHeight - (lines.length * lineHeight) - 4;
         
@@ -89,5 +110,12 @@ public final class DebugRenderer {
             return String.format("%.1fK", number / 1_000.0);
         }
         return String.valueOf(number);
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        int exp = (int) (Math.log(bytes) / Math.log(1024));
+        String pre = "KMGTPE".charAt(exp - 1) + "B";
+        return String.format("%.1f %s", bytes / Math.pow(1024, exp), pre);
     }
 }
