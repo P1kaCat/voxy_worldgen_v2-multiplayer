@@ -104,15 +104,23 @@ public class NetworkHandler {
             if (section == null || section.hasOnlyAir()) continue;
             
             // serialize section
-            RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(io.netty.buffer.Unpooled.buffer()), chunk.getLevel().registryAccess());
-            section.getStates().write(statesBuf);
-            byte[] states = new byte[statesBuf.readableBytes()];
-            statesBuf.readBytes(states);
-            
-            RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(io.netty.buffer.Unpooled.buffer()), chunk.getLevel().registryAccess());
-            section.getBiomes().write(biomesBuf);
-            byte[] biomes = new byte[biomesBuf.readableBytes()];
-            biomesBuf.readBytes(biomes);
+            io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.buffer();
+            io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.buffer();
+            byte[] states, biomes;
+            try {
+                RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(statesRaw), chunk.getLevel().registryAccess());
+                section.getStates().write(statesBuf);
+                states = new byte[statesBuf.readableBytes()];
+                statesBuf.readBytes(states);
+                
+                RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(biomesRaw), chunk.getLevel().registryAccess());
+                section.getBiomes().write(biomesBuf);
+                biomes = new byte[biomesBuf.readableBytes()];
+                biomesBuf.readBytes(biomes);
+            } finally {
+                statesRaw.release();
+                biomesRaw.release();
+            }
             
             // light
             SectionPos sectionPos = SectionPos.of(pos, minY + i);
@@ -123,8 +131,8 @@ public class NetworkHandler {
                 minY + i, 
                 states, 
                 biomes, 
-                bl != null ? bl.getData() : null, 
-                sl != null ? sl.getData() : null
+                bl != null ? bl.getData().clone() : null, 
+                sl != null ? sl.getData().clone() : null
             ));
         }
         
@@ -162,15 +170,23 @@ public class NetworkHandler {
             LevelChunkSection section = chunk.getSections()[i];
             if (section == null || section.hasOnlyAir()) continue;
             
-            RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(io.netty.buffer.Unpooled.buffer()), chunk.getLevel().registryAccess());
-            section.getStates().write(statesBuf);
-            byte[] states = new byte[statesBuf.readableBytes()];
-            statesBuf.readBytes(states);
-            
-            RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(io.netty.buffer.Unpooled.buffer()), chunk.getLevel().registryAccess());
-            section.getBiomes().write(biomesBuf);
-            byte[] biomes = new byte[biomesBuf.readableBytes()];
-            biomesBuf.readBytes(biomes);
+            io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.buffer();
+            io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.buffer();
+            byte[] states, biomes;
+            try {
+                RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(statesRaw), chunk.getLevel().registryAccess());
+                section.getStates().write(statesBuf);
+                states = new byte[statesBuf.readableBytes()];
+                statesBuf.readBytes(states);
+                
+                RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(biomesRaw), chunk.getLevel().registryAccess());
+                section.getBiomes().write(biomesBuf);
+                biomes = new byte[biomesBuf.readableBytes()];
+                biomesBuf.readBytes(biomes);
+            } finally {
+                statesRaw.release();
+                biomesRaw.release();
+            }
             
             SectionPos sectionPos = SectionPos.of(pos, minY + i);
             DataLayer bl = lightEngine.getLayerListener(LightLayer.BLOCK).getDataLayerData(sectionPos);
@@ -180,8 +196,8 @@ public class NetworkHandler {
                 minY + i, 
                 states, 
                 biomes, 
-                bl != null ? bl.getData() : null, 
-                sl != null ? sl.getData() : null
+                bl != null ? bl.getData().clone() : null, 
+                sl != null ? sl.getData().clone() : null
             ));
         }
         

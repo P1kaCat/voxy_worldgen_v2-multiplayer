@@ -180,7 +180,6 @@ public class DistanceGraph {
         int cbz = center.z >> BATCH_SIZE_SHIFT;
         int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
 
-        int rootSize = 1 << ROOT_SIZE_SHIFT;
         int rbxMin = (cbx - rb) >> ROOT_SIZE_SHIFT;
         int rbxMax = (cbx + rb) >> ROOT_SIZE_SHIFT;
         int rbzMin = (cbz - rb) >> ROOT_SIZE_SHIFT;
@@ -264,7 +263,8 @@ public class DistanceGraph {
                 int bx = (nx << 3) + (i & 7);
                 int bz = (nz << 3) + (i >> 3);
                 if (getDistSq(bx, bz, 1, cbx, cbz) <= (double)rb * rb) {
-                    if (node != null && (node.fullMask & (1L << i)) != 0) {
+                    // if node is null (pruned but complete) or the bit is set in fullMask, treat as complete
+                    if (node == null || (node.fullMask & (1L << i)) != 0) {
                         for (int lz = 0; lz < 4; lz++) {
                             for (int lx = 0; lx < 4; lx++) {
                                 ChunkPos pos = new ChunkPos((bx << 2) + lx, (bz << 2) + lz);
@@ -274,7 +274,7 @@ public class DistanceGraph {
                                 }
                             }
                         }
-                    } else if (node != null) {
+                    } else {
                         Object child = node.children.get(i);
                         if (child instanceof Integer mask) {
                             for (int m = 0; m < 16; m++) {
@@ -296,15 +296,12 @@ public class DistanceGraph {
         for (int i = 0; i < 64; i++) {
             int cx = (nx << 3) + (i & 7);
             int cz = (nz << 3) + (i >> 3);
-            if (node == null) {
-                // if node is null, we can't have completed chunks in it
-                continue;
-            }
-            Object child = node.children.get(i);
+            
+            Object child = (node == null) ? null : node.children.get(i);
             if (child instanceof Node childNode) {
                 recursiveCollectCompleted(childNode, level - 1, cx, cz, cbx, cbz, rb, alreadySynced, out, maxResults);
-            } else if ((node.fullMask & (1L << i)) != 0) {
-                // node is full, but child is null? recurse with null node to check masks at l1
+            } else if (node == null || (node.fullMask & (1L << i)) != 0) {
+                // node is pruned-complete or bit is set, recurse with null to handle l1
                 recursiveCollectCompleted(null, level - 1, cx, cz, cbx, cbz, rb, alreadySynced, out, maxResults);
             }
             if (out.size() >= maxResults) return;

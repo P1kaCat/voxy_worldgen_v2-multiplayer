@@ -46,6 +46,8 @@ public class NetworkClientHandler {
         NetworkState.incrementReceived(bytes);
 
         for (NetworkHandler.LODDataPayload.SectionData sectionData : payload.sections()) {
+            io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
+            io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
             try {
                 // recreate section using PalettedContainerFactory
                 PalettedContainerFactory factory = PalettedContainerFactory.create(level.registryAccess());
@@ -53,13 +55,13 @@ public class NetworkClientHandler {
                 
                 // we need to read the states and biomes back using RegistryFriendlyByteBuf for palette consistency
                 net.minecraft.network.RegistryFriendlyByteBuf statesBuf = new net.minecraft.network.RegistryFriendlyByteBuf(
-                    new net.minecraft.network.FriendlyByteBuf(io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states())), 
+                    new net.minecraft.network.FriendlyByteBuf(statesRaw), 
                     level.registryAccess()
                 );
                 ((PalettedContainer<BlockState>) section.getStates()).read(statesBuf);
                 
                 net.minecraft.network.RegistryFriendlyByteBuf biomesBuf = new net.minecraft.network.RegistryFriendlyByteBuf(
-                    new net.minecraft.network.FriendlyByteBuf(io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes())), 
+                    new net.minecraft.network.FriendlyByteBuf(biomesRaw), 
                     level.registryAccess()
                 );
                 ((PalettedContainer<Holder<Biome>>) section.getBiomes()).read(biomesBuf);
@@ -72,6 +74,9 @@ public class NetworkClientHandler {
                 
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("failed to handle LOD data for chunk " + payload.pos(), e);
+            } finally {
+                statesRaw.release();
+                biomesRaw.release();
             }
         }
     }

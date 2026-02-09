@@ -5,12 +5,15 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.Level;
 import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ChunkUpdateTracker {
     private static final ChunkUpdateTracker INSTANCE = new ChunkUpdateTracker();
-    private final Set<Long> dirtyChunks = ConcurrentHashMap.newKeySet();
+    private final Map<ResourceKey<Level>, Set<Long>> dirtyChunks = new ConcurrentHashMap<>();
     private long lastProcessTime = 0;
 
     private ChunkUpdateTracker() {}
@@ -20,20 +23,23 @@ public class ChunkUpdateTracker {
     }
 
     public void markDirty(LevelChunk chunk) {
-        dirtyChunks.add(chunk.getPos().toLong());
+        dirtyChunks.computeIfAbsent(chunk.getLevel().dimension(), k -> ConcurrentHashMap.newKeySet())
+                .add(chunk.getPos().toLong());
     }
 
     public void processDirty(ServerLevel level) {
-        if (level == null || dirtyChunks.isEmpty()) return;
+        if (level == null) return;
+        
+        Set<Long> levelDirty = dirtyChunks.get(level.dimension());
+        if (levelDirty == null || levelDirty.isEmpty()) return;
 
         // throttle processing to every 2 seconds (40 ticks)
         long now = System.currentTimeMillis();
         if (now - lastProcessTime < 2000) return;
         lastProcessTime = now;
 
-        Set<Long> toProcess = new java.util.HashSet<>(dirtyChunks);
-        dirtyChunks.clear();
-
+        Set<Long> toProcess = new java.util.HashSet<>(levelDirty);
+        
         for (long posLong : toProcess) {
             ChunkPos pos = new ChunkPos(posLong);
             LevelChunk chunk = level.getChunkSource().getChunk(pos.x, pos.z, false);
@@ -41,5 +47,8 @@ public class ChunkUpdateTracker {
                 NetworkHandler.broadcastLODData(chunk);
             }
         }
+        
+        // remove only what we processed to avoid losing concurrent additions
+        levelDirty.removeAll(toProcess);
     }
 }
