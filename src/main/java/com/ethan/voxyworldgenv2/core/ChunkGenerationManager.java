@@ -379,9 +379,10 @@ public final class ChunkGenerationManager {
             }
         }
         
-        // majority check for currentLevel
+        // majority check for currentLevel - only switch when a candidate strictly exceeds the current level's count...
         ServerLevel majorLevel = currentLevel;
-        int maxCount = -1;
+        int maxCount = levelCounts.getOrDefault(currentLevel, 0);
+        
         for (var entry : levelCounts.entrySet()) {
             if (entry.getValue() > maxCount) {
                 maxCount = entry.getValue();
@@ -430,8 +431,10 @@ public final class ChunkGenerationManager {
                 VoxyWorldGenV2.LOGGER.info("tellus world detected for {}, enabling fast generation", currentDimensionKey);
             }
             ChunkPersistence.load(newLevel, currentDimensionKey, state.completedChunks);
-            for (long pos : state.completedChunks) {
-                state.distanceGraph.markChunkCompleted(ChunkPos.getX(pos), ChunkPos.getZ(pos));
+            synchronized(state.completedChunks) {
+                for (long pos : state.completedChunks) {
+                    state.distanceGraph.markChunkCompleted(ChunkPos.getX(pos), ChunkPos.getZ(pos));
+                }
             }
             state.loaded = true;
         }
@@ -510,7 +513,7 @@ public final class ChunkGenerationManager {
     
     private void onFailure(DimensionState state, ChunkPos pos) {
         stats.incrementFailed();
-        state.remainingInRadius.decrementAndGet();
+        state.remainingInRadius.updateAndGet(v -> Math.max(0, v - 1));
         decrementBatch(state, pos);
     }
 

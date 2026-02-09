@@ -20,9 +20,11 @@ public class ChunkPersistence {
             String dimId = getDimensionId(dimKey);
             Path savePath = level.getServer().getWorldPath(LevelResource.ROOT).resolve("voxy_gen_" + dimId + ".bin");
             try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(savePath)))) {
-                out.writeInt(completedChunks.size());
-                for (Long chunkPos : completedChunks) {
-                    out.writeLong(chunkPos);
+                synchronized(completedChunks) {
+                    out.writeInt(completedChunks.size());
+                    for (Long chunkPos : completedChunks) {
+                        out.writeLong(chunkPos);
+                    }
                 }
             }
         } catch (Exception e) {
