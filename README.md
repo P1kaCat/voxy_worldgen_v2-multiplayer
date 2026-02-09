@@ -9,6 +9,7 @@ This is a rewrite of my old Voxy World Gen mod, this mod is NOT a fork of the pa
 - Generates chunks very fast in the background and auto-ingest them with voxy.
 - Configurable generation speed and queue size.
 - Tellus integration. https://github.com/Yucareux/Tellus
+- Server-side support
 
 ## Dependencies
 
@@ -35,9 +36,6 @@ Artifacts are output to `build/libs/`.
 ## Configuration
 
 Config files are located in `config/voxyworldgenv2.json`.
-
-- `generationSpeed`: Controls how many chunks are processed per tick.
-- `enablePassive`: Toggle background generation.
 
 ## License
 
