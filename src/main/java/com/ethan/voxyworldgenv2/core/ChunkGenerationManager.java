@@ -443,11 +443,15 @@ public final class ChunkGenerationManager {
         var players = PlayerTracker.getInstance().getPlayers();
         if (players.isEmpty()) return;
         
+        java.util.Map<DimensionState, Integer> maxCounts = new java.util.HashMap<>();
         for (ServerPlayer player : players) {
             DimensionState state = getOrSetupState((ServerLevel) player.level());
             int radius = state.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
-            state.remainingInRadius.set(state.distanceGraph.countMissingInRange(player.chunkPosition(), radius));
+            int missing = state.distanceGraph.countMissingInRange(player.chunkPosition(), radius);
+            maxCounts.merge(state, missing, Math::max);
         }
+        
+        maxCounts.forEach((state, count) -> state.remainingInRadius.set(count));
     }
 
     private void updateThrottleCapacity() {

@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ChunkUpdateTracker {
     private static final ChunkUpdateTracker INSTANCE = new ChunkUpdateTracker();
     private final Map<ResourceKey<Level>, Set<Long>> dirtyChunks = new ConcurrentHashMap<>();
-    private long lastProcessTime = 0;
+    private final Map<ResourceKey<Level>, Long> lastProcessTimes = new ConcurrentHashMap<>();
 
     private ChunkUpdateTracker() {}
 
@@ -35,8 +35,9 @@ public class ChunkUpdateTracker {
 
         // throttle processing to every 2 seconds (40 ticks)
         long now = System.currentTimeMillis();
-        if (now - lastProcessTime < 2000) return;
-        lastProcessTime = now;
+        long lastTime = lastProcessTimes.getOrDefault(level.dimension(), 0L);
+        if (now - lastTime < 2000) return;
+        lastProcessTimes.put(level.dimension(), now);
 
         Set<Long> toProcess = new java.util.HashSet<>(levelDirty);
         
