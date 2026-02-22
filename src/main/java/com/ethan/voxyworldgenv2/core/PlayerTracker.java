@@ -5,6 +5,7 @@ import net.minecraft.server.level.ServerPlayer;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class PlayerTracker {
@@ -27,8 +28,13 @@ public class PlayerTracker {
     }
     
     public void removePlayer(ServerPlayer player) {
+        UUID uuid = player.getUUID();
         players.remove(player);
-        syncedChunks.remove(player.getUUID());
+        // CRITICAL: Remove the chunk data from memory when the player leaves
+        it.unimi.dsi.fastutil.longs.LongSet removed = syncedChunks.remove(uuid);
+        if (removed != null) {
+            removed.clear(); 
+        }
     }
     
     public void clear() {
@@ -46,5 +52,15 @@ public class PlayerTracker {
     
     public int getPlayerCount() {
         return players.size();
+    }
+
+    public void clearSyncCacheForPlayer(ServerPlayer player) {
+        if (player == null) return;
+        it.unimi.dsi.fastutil.longs.LongSet synced = syncedChunks.get(player.getUUID());
+        if (synced != null) {
+            // Force clear the sync cache to trigger a full LOD refresh
+            // Useful for dimension changes or manual refreshes
+            synced.clear();
+        }
     }
 }

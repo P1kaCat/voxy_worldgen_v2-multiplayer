@@ -54,11 +54,12 @@ public class ChunkPersistence {
     }
 
     private static String getDimensionId(ResourceKey<Level> dimKey) {
-        return dimKey.toString()
-                .replace("ResourceKey[", "")
-                .replace("]", "")
-                .replace("/", "_")
-                .replace(":", "_")
-                .trim();
+        String rawPath = String.valueOf(dimKey);
+        if (rawPath.contains("/")) {
+            rawPath = rawPath.substring(rawPath.lastIndexOf("/") + 1);
+        } else if (rawPath.contains(":")) {
+            rawPath = rawPath.substring(rawPath.lastIndexOf(":") + 1);
+        }
+        return rawPath.replace("]", "").replace(" ", "").trim();
     }
 }

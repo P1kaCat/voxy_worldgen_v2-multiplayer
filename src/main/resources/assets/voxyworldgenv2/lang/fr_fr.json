@@ -1,0 +1,17 @@
+{
+    "config.voxyworldgenv2.title": "Configuration de Voxy World Gen V2",
+    "config.voxyworldgenv2.category.general": "Paramètres généraux",
+    "config.voxyworldgenv2.option.enabled": "Activer Voxy World Gen V2",
+    "config.voxyworldgenv2.option.enabled.tooltip": "Active ou désactive complètement la logique de génération.",
+    "config.voxyworldgenv2.option.f3_stats": "Afficher les statistiqies dans le menu F3",
+    "config.voxyworldgenv2.option.f3_stats.tooltip": "Affiche les statistiques de génération dans le menu de débogage F3.",
+    "config.voxyworldgenv2.option.radius": "Distance de génération",
+    "config.voxyworldgenv2.option.radius.tooltip": "La distance (en chunks) autour des joueurs où le monde se génerera.",
+    "config.voxyworldgenv2.option.update_interval": "Intervalle (en ticks) du scan de la map",
+    "config.voxyworldgenv2.option.update_interval.tooltip": "Fréquence de scan de nouveaux chunks non générés.",
+    "config.voxyworldgenv2.option.max_queue": "Taille max de la file d'attente",
+    "config.voxyworldgenv2.option.max_queue.tooltip": "Nombre maximum de chunks à garder dans la file d'attente en attente de traitement.",
+    "config.voxyworldgenv2.option.max_active": "Tâches maximal en parallèles",
+    "config.voxyworldgenv2.option.max_active.tooltip": "Nombre maximum de chunks générés simultanément.",
+    "debug.voxyworldgenv2.skipped": "Ignoré"
+}

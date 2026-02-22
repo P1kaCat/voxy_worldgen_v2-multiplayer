@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "voxyworldgenv2",
   "version": "${version}",
-  "name": "Voxy World Gen V2",
+  "name": "Voxy World Gen V2 (Multiplayer Fix)",
   "description": "Optimized passive chunk generation with Voxy integration",
   "authors": [
     "iSeeEthan"
